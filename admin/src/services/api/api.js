@@ -1,8 +1,6 @@
 import { useAuth } from "@clerk/clerk-react";
 
-const BASE_URL =
-    import.meta.env.VITE_API_URL ||
-    "https://tech-quiz-master-1.onrender.com/api";
+const BASE_URL = import.meta.env.VITE_API_URL;
 
 export const apiRequest = async (
     endPoint,

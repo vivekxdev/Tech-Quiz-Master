@@ -1,25 +1,34 @@
 import User from "../model/User.js";
 import "dotenv/config.js";
-import { Webhook } from "svix";
+import { Webhook, WebhookVerificationError } from "svix";
+
+// Per-event chatter is useful while developing but noisy in production, and
+// the payload itself (email addresses, names) must never be written to the
+// log. Failures stay logged in every environment — message/stack only, never
+// the raw request body or headers.
+const logEvent = (...args) => {
+    if (process.env.NODE_ENV !== "production") {
+        console.log(...args);
+    }
+};
 
 export const clerkWebhook = async (req, res) => {
     try {
-        console.log("🚀 Webhook triggered successfully!");
+        // Only the raw Buffer from express.raw() contains the exact signed
+        // bytes; anything else (missing or already-parsed body) cannot be
+        // verified and must be rejected.
+        const payload = Buffer.isBuffer(req.body) ? req.body.toString() : "";
+        if (!payload) {
+            return res.status(400).json({ success: false, message: "Missing request body" });
+        }
 
         const WEBHOOK_SECRET = process.env.CLERK_WEBHOOK_SECRET;
-        const payload = req.body.toString();
-        const headers = req.headers;
-
         const webhook = new Webhook(WEBHOOK_SECRET);
 
-        const evt = webhook.verify(payload, {
-            "svix-id": headers["svix-id"],
-            "svix-timestamp": headers["svix-timestamp"],
-            "svix-signature": headers["svix-signature"],
-        });
+        const evt = webhook.verify(payload, req.headers);
 
         const { type, data } = evt;
-        console.log("EVENT TYPE:", type);
+        logEvent("EVENT TYPE:", type);
 
         // ✅ USER CREATED
         if (type === "user.created") {
@@ -28,10 +37,15 @@ export const clerkWebhook = async (req, res) => {
                     (e) => e.id === data.primary_email_address_id
                 )?.email_address || "";
 
-            // Make admin email configurable via .env
-            const ADMIN_EMAIL = process.env.ADMIN_EMAIL || "vivekbhai100.vk_email";
+            // Admin identity comes from configuration only — never from
+            // source. Fail closed when ADMIN_EMAIL is unset/empty (the guard
+            // also prevents a user with no primary email from matching an
+            // empty value), so every user is stored as "user" unless a real
+            // configured address matches. Valid configured admin emails keep
+            // the exact previous behavior.
+            const ADMIN_EMAIL = process.env.ADMIN_EMAIL?.trim() || "";
             const role =
-                primaryEmail === ADMIN_EMAIL
+                ADMIN_EMAIL && primaryEmail === ADMIN_EMAIL
                     ? "admin"
                     : "user";
 
@@ -49,7 +63,7 @@ export const clerkWebhook = async (req, res) => {
 
         // ✅ LOGIN
         if (type === "session.created") {
-            console.log("Login Detected");
+            logEvent("Login Detected");
 
             try {
                 let user = await User.findOne({ clerkId: data.user_id });
@@ -69,7 +83,7 @@ export const clerkWebhook = async (req, res) => {
                         role: "user",
                         isLoggedIn: true,
                     });
-                    console.log("User created in DB from session.created:", userObj.id, primaryEmail, fullName);
+                    logEvent("User created in DB from session.created:", userObj.id, primaryEmail, fullName);
                 } else {
                     // Update isLoggedIn if user exists
                     await User.findOneAndUpdate(
@@ -77,16 +91,16 @@ export const clerkWebhook = async (req, res) => {
                         { isLoggedIn: true },
                         { upsert: true, new: true }
                     );
-                    console.log("User updated in DB from session.created:", data.user_id);
+                    logEvent("User updated in DB from session.created:", data.user_id);
                 }
             } catch (err) {
-                console.error("❌ Error in session.created user DB logic:", err);
+                console.error("Error in session.created user DB logic:", err?.stack ?? err?.message ?? err);
             }
         }
 
         // ✅ LOGOUT
         if (type === "session.deleted" || type === "session.removed") {
-            console.log("Logout Detected");
+            logEvent("Logout Detected");
 
             await User.findOneAndUpdate(
                 { clerkId: data.user_id },
@@ -105,7 +119,14 @@ export const clerkWebhook = async (req, res) => {
         });
 
     } catch (error) {
-        console.error("❌ Error processing webhook:", error);
-        res.status(500).json({ error: "Internal server error" });
+        if (error instanceof WebhookVerificationError) {
+            return res.status(400).json({ success: false, message: "Invalid webhook signature" });
+        }
+        // Signature was valid but the payload is not JSON — sender's fault too.
+        if (error instanceof SyntaxError) {
+            return res.status(400).json({ success: false, message: "Invalid webhook payload" });
+        }
+        console.error("Webhook processing failed:", error?.stack ?? error?.message ?? error);
+        res.status(500).json({ success: false, message: "Internal server error" });
     }
 };

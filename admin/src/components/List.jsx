@@ -1,28 +1,64 @@
 import React, { useState, useEffect, useRef } from "react";
-import { useLocation } from "react-router-dom";
-import { listPageStyles } from "../assets/dummyStyles.jsx";
-import { useNavigate } from "react-router-dom";
+import { useLocation, useNavigate } from "react-router-dom";
+import {
+  listPageStyles,
+  levelBadgeTone,
+  getLevelTone,
+} from "../assets/dummyStyles.jsx";
 import { useApi } from "../services/api/api.js";
 
 import {
   AlertCircle,
+  ArrowDownUp,
+  Calendar,
   CheckCircle,
+  ChevronDown,
+  Clock,
+  Copy,
+  Cpu,
+  Download,
+  Eye,
+  FileText,
+  Filter,
+  Layers,
+  Plus,
   Search,
+  Trash2,
   X,
   XCircle,
-  Filter,
-  Cpu,
-  Trash2,
-  Clock,
-  FileText,
-  Calendar,
 } from "lucide-react";
+
+const SORT_OPTIONS = [
+  { value: "newest", label: "Newest first" },
+  { value: "oldest", label: "Oldest first" },
+  { value: "name", label: "Name A–Z" },
+  { value: "questions", label: "Most questions" },
+  { value: "time", label: "Longest time" },
+];
+
+const timeOf = (value) => {
+  if (!value) return 0;
+  const parsed = new Date(value).getTime();
+  return Number.isNaN(parsed) ? 0 : parsed;
+};
+
+const SORTERS = {
+  newest: (a, b) => timeOf(b.uploadDate) - timeOf(a.uploadDate),
+  oldest: (a, b) => timeOf(a.uploadDate) - timeOf(b.uploadDate),
+  name: (a, b) => a.name.localeCompare(b.name),
+  questions: (a, b) => (b.questions || 0) - (a.questions || 0),
+  time: (a, b) => (b.timeLimit || 0) - (a.timeLimit || 0),
+};
 
 const List = () => {
   const [technologies, setTechnologies] = useState([]);
+  const [status, setStatus] = useState("loading"); // loading | ready | error
+  const [errorMessage, setErrorMessage] = useState("");
+  const [attempt, setAttempt] = useState(0);
   const [searchTerm, setSearchTerm] = useState("");
   const [selectedLevel, setSelectedLevel] = useState("All");
-  const [animateBorder, setAnimateBorder] = useState(true);
+  const [sortBy, setSortBy] = useState("newest");
+  const [showDropdown, setShowDropdown] = useState(false);
 
   const [confirmDelete, setConfirmDelete] = useState({
     open: false,
@@ -30,9 +66,29 @@ const List = () => {
     techName: "",
   });
 
+  // Focus returns here when the dialog closes, so keyboard users land back
+  // on the control that opened it.
+  const deleteTriggerRef = useRef(null);
+  // The open delete dialog panel, for the Tab focus trap (parity with the
+  // learner app's confirmation dialogs).
+  const dialogRef = useRef(null);
+
+  // One DELETE at a time: a second confirm while the first is in flight used
+  // to fire another request and surface a wrong "Delete failed!" toast.
+  const deletingRef = useRef(false);
+  const [deleting, setDeleting] = useState(false);
+
+  // One duplicate at a time for the same reason.
+  const duplicatingRef = useRef(false);
+  const [duplicating, setDuplicating] = useState(false);
+
+  // The level menu dismisses on outside click like every other menu.
+  const filterWrapRef = useRef(null);
+
   const [toast, setToast] = useState({
     visible: false,
     message: "",
+    type: "success",
   });
 
   const toastTimerRef = useRef(null);
@@ -42,315 +98,718 @@ const List = () => {
 
   const { request } = useApi();
 
-  // Fetch quizzes from backend
+  const showToast = (message, type) => {
+    setToast({ visible: true, message, type });
+    if (toastTimerRef.current) clearTimeout(toastTimerRef.current);
+    toastTimerRef.current = setTimeout(
+      () => setToast((prev) => ({ ...prev, visible: false })),
+      2000,
+    );
+  };
+
+  // Fetch quizzes from backend: loading, ready and error+retry states.
   useEffect(() => {
+    let mounted = true;
     const fetchQuizzes = async () => {
+      setStatus("loading");
       try {
         const data = await request("/admin/quizzes");
+        if (!mounted) return;
         const formatted = (data?.quizzes || []).map((q) => ({
           id: q._id || q.id,
-          name: q.technology || q.name,
+          name: q.technology || q.name || "Untitled quiz",
           level: q.level,
           timeLimit: q.timeLimit,
           questions: q.totalQuestions || (q.questions ? q.questions.length : 0),
           uploadDate: q.createdAt || q.uploadDate,
-          color: "bg-gradient-to-r from-cyan-500 to-blue-500",
-          icon: <Cpu className="w-5 h-5" />,
         }));
         setTechnologies(formatted);
+        setErrorMessage("");
+        setStatus("ready");
       } catch (err) {
+        if (!mounted) return;
         setTechnologies([]);
+        setErrorMessage(err?.message || "Please try again.");
+        setStatus("error");
       }
     };
     fetchQuizzes();
-  }, [location]);
+    return () => {
+      mounted = false;
+    };
+  }, [location, attempt]);
 
-  // DELETE
+  useEffect(() => {
+    return () => {
+      if (toastTimerRef.current) clearTimeout(toastTimerRef.current);
+    };
+  }, []);
+
+  // Escape closes the delete dialog or the level menu, like every other
+  // dialog in the apps; closing the dialog restores focus to its trigger.
+  useEffect(() => {
+    const onKey = (event) => {
+      if (event.key !== "Escape") return;
+      setConfirmDelete((prev) =>
+        prev.open ? { open: false, techId: null, techName: "" } : prev,
+      );
+      if (confirmDelete.open) deleteTriggerRef.current?.focus?.();
+      setShowDropdown(false);
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [confirmDelete.open]);
+
+  // Outside click dismisses the level menu (the filter button itself toggles).
+  useEffect(() => {
+    if (!showDropdown) return;
+    const onDocClick = (event) => {
+      if (!filterWrapRef.current?.contains(event.target)) {
+        setShowDropdown(false);
+      }
+    };
+    document.addEventListener("click", onDocClick, true);
+    return () => document.removeEventListener("click", onDocClick, true);
+  }, [showDropdown]);
+
+  const closeConfirmDelete = () => {
+    setConfirmDelete({ open: false, techId: null, techName: "" });
+    deleteTriggerRef.current?.focus?.();
+  };
+
+  // DELETE — same endpoint and confirmation flow as before.
   const deleteTechnology = async (id) => {
+    if (deletingRef.current) return;
+    deletingRef.current = true;
+    setDeleting(true);
     try {
       await request(`/admin/quiz/${id}`, "DELETE");
       setTechnologies((prev) => prev.filter((tech) => tech.id !== id));
-      setToast({ visible: true, message: "Deleted successfully!" });
-      toastTimerRef.current = setTimeout(() => setToast((prev) => ({ ...prev, visible: false })), 2000);
+      showToast("Deleted successfully!", "success");
+    } catch {
+      showToast("Delete failed!", "error");
+    } finally {
+      deletingRef.current = false;
+      setDeleting(false);
+    }
+  };
+
+  // DUPLICATE — the copy is assembled server-side, so answer keys never
+  // travel through the browser. Refetch keeps the list authoritative.
+  const duplicateQuiz = async (id, name) => {
+    if (duplicatingRef.current) return;
+    duplicatingRef.current = true;
+    setDuplicating(true);
+    try {
+      await request(`/admin/quiz/${id}/duplicate`, "POST");
+      showToast(`"${name}" duplicated successfully!`, "success");
+      setAttempt((n) => n + 1);
     } catch (err) {
-      setToast({ visible: true, message: "Delete failed!" });
-      toastTimerRef.current = setTimeout(() => setToast((prev) => ({ ...prev, visible: false })), 2000);
+      showToast(err?.message || "Duplicate failed!", "error");
+    } finally {
+      duplicatingRef.current = false;
+      setDuplicating(false);
     }
   };
 
   const formatDate = (date) => {
-    const d = new Date(date);
-    return `${d.getDate()} ${d.toLocaleString("en-US", {
+    if (!date) return "—";
+    const parsed = new Date(date);
+    if (Number.isNaN(parsed.getTime())) return "—";
+    return `${parsed.getDate()} ${parsed.toLocaleString("en-US", {
       month: "short",
-    })}, ${d.getFullYear()}`;
+    })}, ${parsed.getFullYear()}`;
   };
 
-  const getLevelColor = (level) => {
-    if (level === "Basic") return "bg-emerald-50 text-emerald-700";
-    if (level === "Intermediate") return "bg-amber-50 text-amber-700";
-    if (level === "Advanced") return "bg-rose-50 text-rose-700";
-    return "";
-  };
+  const getLevelColor = (level) => levelBadgeTone(level);
 
   const getLevelIcon = (level) => {
-    if (level === "Basic") return <CheckCircle className="w-4 h-4" />;
-    if (level === "Intermediate") return <AlertCircle className="w-4 h-4" />;
-    if (level === "Advanced") return <XCircle className="w-4 h-4" />;
+    if (level === "Basic")
+      return <CheckCircle className="h-4 w-4" aria-hidden="true" />;
+    if (level === "Intermediate")
+      return <AlertCircle className="h-4 w-4" aria-hidden="true" />;
+    return <XCircle className="h-4 w-4" aria-hidden="true" />;
   };
 
-  const filteredTechnologies = technologies.filter((t) => {
-    const matchSearch = t.name
-      .toLowerCase()
-      .includes(searchTerm.toLowerCase());
+  const searchNeedle = searchTerm.trim().toLowerCase();
 
-    const matchLevel =
-      selectedLevel === "All" || t.level === selectedLevel;
+  const filteredTechnologies = technologies
+    .filter((t) => {
+      const matchSearch = t.name.toLowerCase().includes(searchNeedle);
+      const matchLevel = selectedLevel === "All" || t.level === selectedLevel;
+      return matchSearch && matchLevel;
+    })
+    .sort(SORTERS[sortBy] || SORTERS.newest);
 
-    return matchSearch && matchLevel;
-  });
+  const filtersActive = searchTerm.trim() !== "" || selectedLevel !== "All";
 
   const levelOptions = [
-    { value: "All", label: "All Levels", bg: "bg-purple-100", border: "border-b-2 border-purple-200", text: "text-slate-700 font-bold" },
-    { value: "Basic", label: "Basic", bg: "bg-emerald-50", border: "border-b-2 border-emerald-100", text: "text-emerald-700" },
-    { value: "Intermediate", label: "Intermediate", bg: "bg-amber-50", border: "border-b-2 border-amber-100", text: "text-amber-700" },
-    { value: "Advanced", label: "Advanced", bg: "bg-rose-50", border: "", text: "text-rose-700" },
+    { value: "All", label: "All Levels" },
+    { value: "Basic", label: "Basic" },
+    { value: "Intermediate", label: "Intermediate" },
+    { value: "Advanced", label: "Advanced" },
   ];
 
-  const [showDropdown, setShowDropdown] = useState(false);
+  const clearFilters = () => {
+    setSearchTerm("");
+    setSelectedLevel("All");
+  };
+
+  // Catalog overview, computed from the loaded list only (no extra requests).
+  const totalQuestions = technologies.reduce(
+    (sum, t) => sum + (Number(t.questions) || 0),
+    0,
+  );
+  const levelsUsed = new Set(
+    technologies.map((t) => t.level).filter(Boolean),
+  ).size;
+  const latestUpload = technologies.reduce(
+    (latest, t) => Math.max(latest, timeOf(t.uploadDate)),
+    0,
+  );
+
+  const exportCatalog = () => {
+    try {
+      const header = "Technology,Level,Time Limit (min),Questions,Created At";
+      const rows = technologies.map((t) => {
+        const uploadedAt = timeOf(t.uploadDate);
+        return [
+          `"${String(t.name).replace(/"/g, '""')}"`,
+          t.level || "",
+          t.timeLimit ?? "",
+          t.questions ?? 0,
+          uploadedAt ? new Date(uploadedAt).toISOString() : "",
+        ].join(",");
+      });
+      const blob = new Blob([[header, ...rows].join("\n")], {
+        type: "text/csv;charset=utf-8;",
+      });
+      const url = URL.createObjectURL(blob);
+      const link = document.createElement("a");
+      link.href = url;
+      link.download = "tech-quiz-catalog.csv";
+      document.body.appendChild(link);
+      link.click();
+      link.remove();
+      URL.revokeObjectURL(url);
+      showToast("Catalog exported successfully!", "success");
+    } catch {
+      showToast("Export failed!", "error");
+    }
+  };
 
   return (
     <div className={listPageStyles.page}>
-      <style>{listPageStyles.customCSS}</style>
-
       <div className={listPageStyles.container}>
         {/* HEADER */}
-        <div className="max-w-7xl mx-auto w-full">
-          <h1
-            className="text-4xl md:text-5xl font-extrabold text-center mb-2 tracking-tight animate-gradient-move"
-            style={{
-              background: "linear-gradient(90deg, #a21caf 0%, #ec4899 50%, #6366f1 100%)",
-              WebkitBackgroundClip: "text",
-              WebkitTextFillColor: "transparent",
-              backgroundClip: "text",
-              color: "transparent",
-              backgroundSize: "200% 200%",
-            }}
-          >
-            Tech Quiz Master
-          </h1>
-          <style>{`
-            @keyframes gradient-move {
-              0% { background-position: 0% 50%; }
-              50% { background-position: 100% 50%; }
-              100% { background-position: 0% 50%; }
-            }
-            .animate-gradient-move {
-              background-size: 200% 200%;
-              animation: gradient-move 3s ease-in-out infinite;
-            }
-          `}</style>
-          <p className="text-center text-lg md:text-xl font-medium text-slate-600 mb-8 mt-2 px-2 md:px-0" style={{letterSpacing: '0.01em', maxWidth: 700, margin: '0 auto'}}>
-            Empower your learning journey! Effortlessly create, manage, and review technology quizzes with a beautiful, intuitive, and responsive interface.
-          </p>
-        </div>
+        <header className={listPageStyles.headerWrapper}>
+          <div className={listPageStyles.headerRow}>
+            <div>
+              <span className={listPageStyles.headerEyebrow}>
+                <Layers className="h-3.5 w-3.5" aria-hidden="true" />
+                Quiz management
+              </span>
+              <h1 className={listPageStyles.title}>Quizzes</h1>
+              <p className={listPageStyles.subtitle}>
+                Review every uploaded quiz and remove the ones you no longer need.
+              </p>
+            </div>
+            <div className={listPageStyles.headerActions}>
+              <button
+                type="button"
+                className={listPageStyles.exportButton}
+                onClick={exportCatalog}
+                disabled={status !== "ready" || technologies.length === 0}
+              >
+                <Download className={listPageStyles.exportIcon} aria-hidden="true" />
+                Export CSV
+              </button>
+              <button
+                type="button"
+                className={listPageStyles.newQuizButton}
+                onClick={() => navigate("/dashboard")}
+              >
+                <Plus className={listPageStyles.newQuizIcon} aria-hidden="true" />
+                New quiz
+              </button>
+            </div>
+          </div>
+        </header>
 
-        {/* SEARCH & FILTER */}
-        <div className="w-full flex justify-center mb-10 relative">
-          <div className="relative bg-white rounded-2xl shadow p-2 flex items-center w-full">
-            <Search className="absolute left-4 top-1/2 -translate-y-1/2 w-5 h-5 text-slate-400" />
-            <input
-              type="text"
-              placeholder="Search Technologies..."
-              value={searchTerm}
-              onChange={(e) => setSearchTerm(e.target.value)}
-              className="w-full pl-12 pr-40 py-3 bg-transparent rounded-xl outline-none text-slate-700 font-medium text-base focus:ring-2 focus:ring-purple-200 transition"
-            />
-            {/* Custom Dropdown */}
-            <div className="absolute right-4 top-1/2 -translate-y-1/2 flex items-center gap-2 z-20">
-              <div className="relative">
-                <button
-                  className="flex items-center bg-gradient-to-r from-purple-100 to-blue-100 border border-purple-200 rounded-xl px-3 py-1 shadow-sm hover:shadow-md transition cursor-pointer min-w-[110px] text-purple-700 font-semibold text-base focus:outline-none"
-                  onClick={() => setShowDropdown((prev) => !prev)}
-                  type="button"
-                >
-                  <Filter className="w-5 h-5 text-purple-500 mr-2" />
-                  {levelOptions.find((opt) => opt.value === selectedLevel)?.label || "All Levels"}
-                  <svg className="ml-2 w-4 h-4 text-purple-500" fill="none" stroke="currentColor" strokeWidth="2" viewBox="0 0 24 24"><path d="M19 9l-7 7-7-7" /></svg>
-                </button>
-                {showDropdown && (
-                  <div className="absolute right-0 mt-2 w-48 rounded-xl shadow-2xl border border-slate-200 bg-white overflow-hidden animate-fade-in">
-                    {levelOptions.map((opt, idx) => (
-                      <div
-                        key={opt.value}
-                        className={`cursor-pointer px-5 py-3 ${opt.bg} ${opt.text} ${opt.border} hover:bg-purple-50 transition-all duration-150`}
-                        onClick={() => {
-                          setSelectedLevel(opt.value);
-                          setShowDropdown(false);
-                        }}
-                        style={{ fontWeight: selectedLevel === opt.value ? "bold" : "normal" }}
-                      >
-                        {opt.label}
-                      </div>
-                    ))}
-                  </div>
-                )}
+        {/* OVERVIEW — real values computed from the loaded catalog */}
+        {status === "ready" && technologies.length > 0 && (
+          <div className={listPageStyles.overview}>
+            <div className={listPageStyles.overviewCard}>
+              <span
+                className={`${listPageStyles.overviewIconBox} ${listPageStyles.overviewIconIndigo}`}
+                aria-hidden="true"
+              >
+                <Layers className={listPageStyles.overviewIcon} />
+              </span>
+              <div>
+                <div className={listPageStyles.overviewLabel}>Quizzes</div>
+                <div className={listPageStyles.overviewValue}>
+                  {technologies.length}
+                </div>
               </div>
             </div>
-            <style>{`
-              @keyframes fade-in {
-                from { opacity: 0; transform: translateY(-8px); }
-                to { opacity: 1; transform: translateY(0); }
-              }
-              .animate-fade-in {
-                animation: fade-in 0.18s cubic-bezier(.4,0,.2,1);
-              }
-            `}</style>
+            <div className={listPageStyles.overviewCard}>
+              <span
+                className={`${listPageStyles.overviewIconBox} ${listPageStyles.overviewIconEmerald}`}
+                aria-hidden="true"
+              >
+                <FileText className={listPageStyles.overviewIcon} />
+              </span>
+              <div>
+                <div className={listPageStyles.overviewLabel}>Questions</div>
+                <div className={listPageStyles.overviewValue}>
+                  {totalQuestions}
+                </div>
+              </div>
+            </div>
+            <div className={listPageStyles.overviewCard}>
+              <span
+                className={`${listPageStyles.overviewIconBox} ${listPageStyles.overviewIconAmber}`}
+                aria-hidden="true"
+              >
+                <Cpu className={listPageStyles.overviewIcon} />
+              </span>
+              <div>
+                <div className={listPageStyles.overviewLabel}>Levels used</div>
+                <div className={listPageStyles.overviewValue}>{levelsUsed}</div>
+              </div>
+            </div>
+            <div className={listPageStyles.overviewCard}>
+              <span
+                className={`${listPageStyles.overviewIconBox} ${listPageStyles.overviewIconViolet}`}
+                aria-hidden="true"
+              >
+                <Calendar className={listPageStyles.overviewIcon} />
+              </span>
+              <div>
+                <div className={listPageStyles.overviewLabel}>Latest upload</div>
+                <div className={listPageStyles.overviewMeta}>
+                  {latestUpload ? formatDate(new Date(latestUpload)) : "—"}
+                </div>
+              </div>
+            </div>
+          </div>
+        )}
+
+        {/* SEARCH, FILTER & SORT */}
+        <div className={listPageStyles.toolbar}>
+          <div className={listPageStyles.searchCard}>
+            <Search
+              className={listPageStyles.searchIcon}
+              aria-hidden="true"
+            />
+            <input
+              type="text"
+              aria-label="Search quizzes by technology"
+              placeholder="Search technologies..."
+              value={searchTerm}
+              onChange={(e) => setSearchTerm(e.target.value)}
+              className={listPageStyles.searchInput}
+            />
+            {searchTerm && (
+              <button
+                type="button"
+                aria-label="Clear search"
+                className={listPageStyles.searchClear}
+                onClick={() => setSearchTerm("")}
+              >
+                <X className="h-4 w-4" aria-hidden="true" />
+              </button>
+            )}
+          </div>
+          <div className={listPageStyles.filterWrap} ref={filterWrapRef}>
+            <button
+              type="button"
+              aria-haspopup="menu"
+              aria-expanded={showDropdown}
+              className={listPageStyles.filterButton}
+              onClick={() => setShowDropdown((prev) => !prev)}
+            >
+              <Filter className={listPageStyles.filterIcon} aria-hidden="true" />
+              {levelOptions.find((opt) => opt.value === selectedLevel)?.label ||
+                "All Levels"}
+              <ChevronDown
+                className={listPageStyles.filterChevron}
+                aria-hidden="true"
+              />
+            </button>
+            {showDropdown && (
+              <div className={listPageStyles.filterMenu} role="menu">
+                {levelOptions.map((opt) => (
+                  <button
+                    key={opt.value}
+                    type="button"
+                    role="menuitemradio"
+                    aria-checked={selectedLevel === opt.value}
+                    className={`${listPageStyles.filterOption} ${
+                      selectedLevel === opt.value
+                        ? listPageStyles.filterOptionActive
+                        : ""
+                    }`}
+                    onClick={() => {
+                      setSelectedLevel(opt.value);
+                      setShowDropdown(false);
+                    }}
+                  >
+                    {opt.label}
+                  </button>
+                ))}
+              </div>
+            )}
+          </div>
+          <div className={listPageStyles.sortWrap}>
+            <label className={listPageStyles.sortLabel} htmlFor="quiz-sort">
+              Sort quizzes
+            </label>
+            <ArrowDownUp
+              className={listPageStyles.sortIcon}
+              aria-hidden="true"
+            />
+            <select
+              id="quiz-sort"
+              className={listPageStyles.sortSelect}
+              value={sortBy}
+              onChange={(e) => setSortBy(e.target.value)}
+            >
+              {SORT_OPTIONS.map((opt) => (
+                <option key={opt.value} value={opt.value}>
+                  {opt.label}
+                </option>
+              ))}
+            </select>
+            <ChevronDown
+              className={listPageStyles.sortChevron}
+              aria-hidden="true"
+            />
           </div>
         </div>
 
-        {/* CARDS OR EMPTY STATE */}
-        {filteredTechnologies.length === 0 ? (
-          <div className="flex flex-col items-center justify-center py-24 animate-fade-in">
-            <div className="w-20 h-20 mb-4 flex items-center justify-center rounded-2xl bg-gradient-to-r from-slate-100 to-blue-100 shadow">
-              <svg width="48" height="48" fill="none" stroke="#6366f1" strokeWidth="2" viewBox="0 0 24 24"><rect x="4" y="4" width="16" height="16" rx="3"/><path d="M9 9h6M9 13h6"/></svg>
-            </div>
-            <h2 className="text-xl font-bold text-slate-800 mb-2">No technologies found</h2>
-            <p className="text-slate-600 mb-6">Get Started by creating your first technology quiz.</p>
-            <button
-              className="px-6 py-3 bg-gradient-to-r from-blue-500 to-indigo-500 text-white rounded-2xl hover:from-blue-600 hover:to-indigo-600 hover:shadow-xl transition-all duration-300 font-bold text-sm flex items-center gap-2"
-              onClick={() => navigate("/dashboard")}
-            >
-              <svg className="w-5 h-5" fill="none" stroke="currentColor" strokeWidth="2" viewBox="0 0 24 24"><path d="M12 4v16m8-8H4"/></svg>
-              Create First Quiz
-            </button>
-            <style>{`
-              @keyframes fade-in {
-                from { opacity: 0; transform: scale(0.96); }
-                to { opacity: 1; transform: scale(1); }
-              }
-              .animate-fade-in {
-                animation: fade-in 0.25s cubic-bezier(.4,0,.2,1);
-              }
-            `}</style>
+        {filtersActive && status === "ready" && (
+          <p className={listPageStyles.resultCount} role="status">
+            {filteredTechnologies.length} of {technologies.length} quizzes
+          </p>
+        )}
+
+        {/* LOADING */}
+        {status === "loading" && (
+          <div
+            className={listPageStyles.loadingGrid}
+            role="status"
+            aria-busy="true"
+          >
+            <span className="sr-only">Loading quizzes…</span>
+            {[0, 1, 2, 3, 4, 5].map((i) => (
+              <div key={i} className={listPageStyles.loadingCard}>
+                <div
+                  className={`${listPageStyles.skeletonLine} mb-3 h-5 w-2/3`}
+                />
+                <div
+                  className={`${listPageStyles.skeletonLine} mb-2 h-4 w-full`}
+                />
+                <div
+                  className={`${listPageStyles.skeletonLine} mb-4 h-4 w-1/2`}
+                />
+                <div className={`${listPageStyles.skeletonLine} h-10 w-full`} />
+              </div>
+            ))}
           </div>
-        ) : (
+        )}
+
+        {/* ERROR */}
+        {status === "error" && (
+          <div className={listPageStyles.errorCard} role="alert">
+            <h2 className={listPageStyles.errorTitle}>
+              Couldn&apos;t load your quizzes
+            </h2>
+            <p className={listPageStyles.errorText}>{errorMessage}</p>
+            <button
+              type="button"
+              className={listPageStyles.errorRetry}
+              onClick={() => setAttempt((n) => n + 1)}
+            >
+              Try again
+            </button>
+          </div>
+        )}
+
+        {/* EMPTY OR NO MATCH */}
+        {status === "ready" && filteredTechnologies.length === 0 && (
+          <div className={listPageStyles.emptyContainer}>
+            <div className={listPageStyles.emptyIconBox}>
+              <Cpu
+                className={listPageStyles.emptyIcon}
+                aria-hidden="true"
+              />
+            </div>
+            {technologies.length === 0 ? (
+              <>
+                <h2 className={listPageStyles.emptyTitle}>
+                  No technologies found
+                </h2>
+                <p className={listPageStyles.emptyText}>
+                  Get Started by creating your first technology quiz.
+                </p>
+                <button
+                  type="button"
+                  className={listPageStyles.emptyButton}
+                  onClick={() => navigate("/dashboard")}
+                >
+                  <Plus
+                    className={listPageStyles.emptyButtonIcon}
+                    aria-hidden="true"
+                  />
+                  <span className={listPageStyles.emptyButtonText}>
+                    Create First Quiz
+                  </span>
+                </button>
+              </>
+            ) : (
+              <>
+                <h2 className={listPageStyles.emptyTitle}>
+                  No quizzes match your filters
+                </h2>
+                <p className={listPageStyles.emptyText}>
+                  Try a different search term or level.
+                </p>
+                <button
+                  type="button"
+                  className={listPageStyles.clearFiltersButton}
+                  onClick={clearFilters}
+                >
+                  Clear filters
+                </button>
+              </>
+            )}
+          </div>
+        )}
+
+        {/* CARDS */}
+        {status === "ready" && filteredTechnologies.length > 0 && (
           <div className={listPageStyles.grid}>
-            {filteredTechnologies.map((tech) => (
+            {filteredTechnologies.map((tech) => {
+              const tone = getLevelTone(tech.level);
+              return (
               <div key={tech.id} className={listPageStyles.cardGroup}>
                 <div className={listPageStyles.card}>
+                  <div
+                    className={`${listPageStyles.cardAccent} ${tone.soft}`}
+                    aria-hidden="true"
+                  />
                   {/* HEADER */}
-                  <div className={`${listPageStyles.cardHeader} ${tech.color}`}>
+                  <div className={listPageStyles.cardHeader}>
                     <div className={listPageStyles.cardHeaderInner}>
                       <div className={listPageStyles.cardHeaderLeft}>
-                        <div className={listPageStyles.iconWrapper}>
-                          {tech.icon}
+                        <div
+                          className={`${listPageStyles.iconWrapper} ${tone.bg} ${tone.text} ${tone.border}`}
+                        >
+                          <Cpu className="w-5 h-5" aria-hidden="true" />
                         </div>
-                        <h3 className={listPageStyles.techName}>{tech.name}</h3>
+                        <h2 className={listPageStyles.techName}>{tech.name}</h2>
                       </div>
-                      <span className={`${listPageStyles.levelBadgeBase} ${getLevelColor(tech.level)}`}>
-                        {getLevelIcon(tech.level)} {tech.level}
+                      <span
+                        className={`${listPageStyles.levelBadgeBase} ${getLevelColor(tech.level)}`}
+                      >
+                        {getLevelIcon(tech.level)}
+                        {tech.level || "Unknown"}
                       </span>
                     </div>
                   </div>
                   {/* BODY */}
                   <div className={listPageStyles.cardBody}>
                     <div className={listPageStyles.cardBodyContent}>
-                      <div className={listPageStyles.statsGrid}>
-                        {/* TIME */}
-                        <div className={`${listPageStyles.statCardBase} ${listPageStyles.statCardTime}`}>
-                          <div className="flex items-center gap-3">
-                            <div className={`${listPageStyles.statIconBox} ${listPageStyles.statIconBoxBlue}`}>
-                              <Clock className={`${listPageStyles.statIcon} ${listPageStyles.statIconBlue}`} />
-                            </div>
-                            <div>
-                              <p className={listPageStyles.statLabel}>Time</p>
-                              <p className={listPageStyles.statValue}>{tech.timeLimit} min</p>
-                            </div>
-                          </div>
-                        </div>
-                        {/* QUESTIONS */}
-                        <div className={`${listPageStyles.statCardBase} ${listPageStyles.statCardQuestions}`}>
-                          <div className="flex items-center gap-3">
-                            <div className={`${listPageStyles.statIconBox} ${listPageStyles.statIconBoxEmerald}`}>
-                              <FileText className={`${listPageStyles.statIcon} ${listPageStyles.statIconEmerald}`} />
-                            </div>
-                            <div>
-                              <p className={listPageStyles.statLabel}>Questions</p>
-                              <p className={listPageStyles.statValue}>{tech.questions}</p>
-                            </div>
-                          </div>
-                        </div>
-                      </div>
-                      {/* DATE */}
-                      <div className={`${listPageStyles.statCardBase} ${listPageStyles.statCardDate}`}>
-                        <div className="flex items-center gap-3">
-                          <div className={`${listPageStyles.statIconBox} ${listPageStyles.statIconBoxPurple}`}>
-                            <Calendar className={`${listPageStyles.statIcon} ${listPageStyles.statIconPurple}`} />
-                          </div>
-                          <div>
-                            <p className={listPageStyles.statLabel}>Uploaded</p>
-                            <p className={listPageStyles.statValue}>{formatDate(tech.uploadDate)}</p>
-                          </div>
-                        </div>
+                      <div className={listPageStyles.metaRow}>
+                        <span className={listPageStyles.metaItem}>
+                          <Clock
+                            className={listPageStyles.metaIcon}
+                            aria-hidden="true"
+                          />
+                          <span className={listPageStyles.metaValue}>
+                            {tech.timeLimit != null
+                              ? `${tech.timeLimit} min`
+                              : "—"}
+                          </span>
+                        </span>
+                        <span className={listPageStyles.metaItem}>
+                          <FileText
+                            className={listPageStyles.metaIcon}
+                            aria-hidden="true"
+                          />
+                          <span className={listPageStyles.metaValue}>
+                            {tech.questions} questions
+                          </span>
+                        </span>
+                        <span className={listPageStyles.metaItem}>
+                          <Calendar
+                            className={listPageStyles.metaIcon}
+                            aria-hidden="true"
+                          />
+                          <span className={listPageStyles.metaValue}>
+                            {formatDate(tech.uploadDate)}
+                          </span>
+                        </span>
                       </div>
                     </div>
-                    {/* DELETE */}
+                    {/* ACTIONS */}
                     <div className={listPageStyles.cardFooter}>
                       <button
-                        onClick={() =>
-                          setConfirmDelete({
-                            open: true,
-                            techId: tech.id,
-                            techName: tech.name,
-                          })
-                        }
-                        className={listPageStyles.deleteButton}
+                        type="button"
+                        onClick={() => navigate(`/quiz/${tech.id}`)}
+                        className={listPageStyles.viewButton}
+                        aria-label={`View ${tech.name}`}
                       >
-                        <Trash2 className={listPageStyles.trashIcon} />
-                        Delete
+                        <Eye className={listPageStyles.viewIcon} aria-hidden="true" />
+                        View
                       </button>
+                      <div className={listPageStyles.cardFooterActions}>
+                        <button
+                          type="button"
+                          disabled={duplicating}
+                          onClick={() => duplicateQuiz(tech.id, tech.name)}
+                          className={listPageStyles.duplicateButton}
+                          aria-label={`Duplicate ${tech.name}`}
+                          title={`Duplicate ${tech.name}`}
+                        >
+                          <Copy className={listPageStyles.duplicateIcon} aria-hidden="true" />
+                          Duplicate
+                        </button>
+                        <button
+                          type="button"
+                          disabled={deleting}
+                          onClick={() => {
+                            deleteTriggerRef.current = document.activeElement;
+                            setConfirmDelete({
+                              open: true,
+                              techId: tech.id,
+                              techName: tech.name,
+                            });
+                          }}
+                          className={listPageStyles.deleteButton}
+                          aria-label={`Delete ${tech.name}`}
+                        >
+                          <Trash2
+                            className={listPageStyles.trashIcon}
+                            aria-hidden="true"
+                          />
+                          Delete
+                        </button>
+                      </div>
                     </div>
                   </div>
                 </div>
               </div>
-            ))}
+              );
+            })}
           </div>
         )}
-        {/* MODAL */}
+
+        {/* DELETE CONFIRMATION */}
         {confirmDelete.open && (
-          <div className="fixed inset-0 flex items-center justify-center bg-black/40 backdrop-blur-sm z-50 transition-all">
-            <div className="bg-white rounded-2xl p-8 w-[90%] max-w-xs shadow-2xl border border-slate-100 animate-fade-in">
-              <h3 className="text-lg font-semibold mb-2 text-slate-800">Delete Quiz?</h3>
-              <p className="text-sm text-slate-600 mb-6">
-                Are you sure you want to delete <span className="font-semibold text-rose-600">{confirmDelete.techName}</span>? This action cannot be undone.
+          <div
+            className={listPageStyles.modalOverlay}
+            onClick={closeConfirmDelete}
+            onKeyDown={(event) => {
+              if (event.key !== "Tab") return;
+              const focusable = dialogRef.current?.querySelectorAll(
+                'button, [href], input, select, textarea, [tabindex]:not([tabindex="-1"])',
+              );
+              if (!focusable || focusable.length === 0) return;
+              const first = focusable[0];
+              const last = focusable[focusable.length - 1];
+              if (event.shiftKey && document.activeElement === first) {
+                event.preventDefault();
+                last.focus();
+              } else if (!event.shiftKey && document.activeElement === last) {
+                event.preventDefault();
+                first.focus();
+              }
+            }}
+          >
+            <div
+              ref={dialogRef}
+              className={listPageStyles.modalCard}
+              role="dialog"
+              aria-modal="true"
+              aria-labelledby="delete-quiz-title"
+              onClick={(event) => event.stopPropagation()}
+            >
+              <div className={listPageStyles.modalIconBox} aria-hidden="true">
+                <Trash2 className={listPageStyles.modalIcon} />
+              </div>
+              <h3 id="delete-quiz-title" className={listPageStyles.modalTitle}>
+                Delete Quiz?
+              </h3>
+              <p className={listPageStyles.modalText}>
+                Are you sure you want to delete{" "}
+                <span className={listPageStyles.modalName}>
+                  {confirmDelete.techName}
+                </span>
+                ? This action cannot be undone.
               </p>
-              <div className="flex justify-end gap-3">
+              <div className={listPageStyles.modalActions}>
                 <button
-                  onClick={() => setConfirmDelete({ open: false })}
-                  className="px-4 py-2 rounded-lg border border-slate-200 bg-white text-slate-700 font-semibold hover:bg-slate-50 transition"
+                  type="button"
+                  autoFocus
+                  onClick={closeConfirmDelete}
+                  className={listPageStyles.modalCancel}
                 >
                   Cancel
                 </button>
                 <button
+                  type="button"
                   onClick={() => {
                     deleteTechnology(confirmDelete.techId);
-                    setConfirmDelete({ open: false });
+                    closeConfirmDelete();
                   }}
-                  className="px-4 py-2 rounded-lg bg-rose-500 text-white font-semibold shadow hover:bg-rose-600 transition"
+                  className={listPageStyles.modalDelete}
                 >
                   Delete
                 </button>
               </div>
             </div>
-            <style>{`
-              @keyframes fade-in {
-                from { opacity: 0; transform: scale(0.96); }
-                to { opacity: 1; transform: scale(1); }
-              }
-              .animate-fade-in {
-                animation: fade-in 0.25s cubic-bezier(.4,0,.2,1);
-              }
-            `}</style>
+          </div>
+        )}
+
+        {/* DELETE FEEDBACK */}
+        {toast.visible && (
+          <div
+            className={listPageStyles.toastContainer}
+            role={toast.type === "error" ? "alert" : "status"}
+          >
+            <div
+              className={`${listPageStyles.toastInner} ${
+                toast.type === "error"
+                  ? listPageStyles.toastError
+                  : listPageStyles.toastSuccess
+              }`}
+            >
+              {toast.type === "error" ? (
+                <XCircle
+                  className={listPageStyles.toastIconError}
+                  aria-hidden="true"
+                />
+              ) : (
+                <CheckCircle
+                  className={listPageStyles.toastIconSuccess}
+                  aria-hidden="true"
+                />
+              )}
+              <span className={listPageStyles.toastMessage}>{toast.message}</span>
+              <button
+                type="button"
+                aria-label="Dismiss notification"
+                className={listPageStyles.toastClose}
+                onClick={() =>
+                  setToast((prev) => ({ ...prev, visible: false }))
+                }
+              >
+                <X className="h-4 w-4" aria-hidden="true" />
+              </button>
+            </div>
           </div>
         )}
       </div>

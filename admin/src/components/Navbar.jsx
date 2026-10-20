@@ -1,6 +1,6 @@
 import React, { useState, useEffect, useRef } from 'react';
 import { navbarStyles } from '../assets/dummyStyles.jsx';
-import { useNavigate } from 'react-router-dom';
+import { useLocation, useNavigate } from 'react-router-dom';
 import { UserButton, useUser, SignInButton, useAuth } from '@clerk/clerk-react';
 import { List, Home, User, X, Menu } from 'lucide-react';
 
@@ -13,6 +13,12 @@ const Navbar = ({
   const { isSignedIn } = useUser();
   const { getToken } = useAuth();
   const navigate = useNavigate();
+  const location = useLocation();
+
+  // Current-page markers, announced via aria-current and drawn with the
+  // registry's active-state classes.
+  const onDashboard = location.pathname === '/dashboard';
+  const onList = location.pathname === '/list';
 
   // To collapse the model on escape key
   useEffect(() => {
@@ -64,8 +70,8 @@ const Navbar = ({
        } catch (error) {
         console.error("Error getting Clerk token:", error);
        }
-       const path = window.location.pathname;
-       const shouldRedirect = path === '/' || path === '/login' || path === 'signin' || path === '';
+        const path = window.location.pathname;
+        const shouldRedirect = path === '/' || path === '/login' || path === '/signin' || path === '';
 
        if( shouldRedirect ) {
         if (onNavigate) onNavigate('/dashboard');
@@ -86,7 +92,7 @@ const Navbar = ({
   return (
     <nav className={navbarStyles.nav}>
       <div className={navbarStyles.container}>
-        <div className="relative h-16 flex items-center justify-between">
+        <div className={navbarStyles.innerContainer}>
 
           {/* LEFT - LOGO */}
           <button
@@ -100,7 +106,7 @@ const Navbar = ({
                   logoSrc ||
                   'https://cdn-icons-png.flaticon.com/128/5806/5806364.png'
                 }
-                alt="logo"
+                alt=""
                 className={navbarStyles.logoImg}
               />
             </div>
@@ -114,14 +120,18 @@ const Navbar = ({
           </button>
 
           {/* CENTER MENU */}
-          <div className="hidden md:flex items-center gap-4">
+          <div className={navbarStyles.desktopCenterContainer}>
+            <div className={navbarStyles.desktopCenterInner}>
 
             {/* ONLY WHEN LOGGED IN */}
             {isSignedIn && (
               <>
                 <button
                   onClick={() => handleNavigate('/dashboard')}
-                  className={navbarStyles.dashboardButton}
+                  className={`${navbarStyles.dashboardButton} ${
+                    onDashboard ? navbarStyles.dashboardButtonActive : ''
+                  }`}
+                  aria-current={onDashboard ? 'page' : undefined}
                 >
                   <Home className={navbarStyles.dashboardIcon} />
                   <span>Dashboard</span>
@@ -129,7 +139,10 @@ const Navbar = ({
 
                 <button
                   onClick={() => handleNavigate('/list')}
-                  className={navbarStyles.listButton}
+                  className={`${navbarStyles.listButton} ${
+                    onList ? navbarStyles.listButtonActive : ''
+                  }`}
+                  aria-current={onList ? 'page' : undefined}
                 >
                   <List className={navbarStyles.listIcon} />
                   <span>List Quiz</span>
@@ -137,10 +150,11 @@ const Navbar = ({
               </>
             )}
 
+            </div>
           </div>
 
           {/* RIGHT SIDE */}
-          <div className="flex items-center gap-3">
+          <div className={navbarStyles.desktopRightContent}>
 
             {/* NOT LOGGED IN → MY PROFILE */}
             {!isSignedIn && (
@@ -155,7 +169,6 @@ const Navbar = ({
             {/* LOGGED IN → AVATAR */}
             {isSignedIn && (
               <div className={navbarStyles.profileGroup}>
-                <div className={navbarStyles.profileBlur} />
                 <UserButton
                   appearance={{ elements: { avatarBox: 'w-9 h-9' } }}
                 />
@@ -168,11 +181,13 @@ const Navbar = ({
                 type="button"
                 onClick={() => setMobileMenuOpen((s) => !s)}
                 className={navbarStyles.hamburgerButton}
+                aria-label={mobileMenuOpen ? 'Close menu' : 'Open menu'}
+                aria-expanded={mobileMenuOpen}
               >
                 {mobileMenuOpen ? (
-                  <X className={navbarStyles.xIcon} />
+                  <X className={navbarStyles.xIcon} aria-hidden="true" />
                 ) : (
-                  <Menu className={navbarStyles.menuIcon} />
+                  <Menu className={navbarStyles.menuIcon} aria-hidden="true" />
                 )}
               </button>
             </div>
@@ -209,7 +224,10 @@ const Navbar = ({
                 <>
                   <button
                     onClick={() => handleNavigate('/dashboard')}
-                    className={navbarStyles.mobileNavButton}
+                    className={`${navbarStyles.mobileNavButton} ${
+                      onDashboard ? navbarStyles.mobileNavButtonActive : ''
+                    }`}
+                    aria-current={onDashboard ? 'page' : undefined}
                   >
                     <Home className={navbarStyles.mobileNavIcon} />
                     <div>
@@ -221,7 +239,10 @@ const Navbar = ({
 
                   <button
                     onClick={() => handleNavigate('/list')}
-                    className={navbarStyles.mobileNavButton}
+                    className={`${navbarStyles.mobileNavButton} ${
+                      onList ? navbarStyles.mobileNavButtonActive : ''
+                    }`}
+                    aria-current={onList ? 'page' : undefined}
                   >
                     <List className={navbarStyles.mobileNavIcon} />
                     <div>

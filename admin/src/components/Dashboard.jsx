@@ -1,17 +1,45 @@
 import React, { useEffect, useRef, useState } from 'react'
+import { useNavigate } from 'react-router-dom'
 import { useApi } from '../services/api/api.js';
-import { dashboardStyles } from '../assets/dummyStyles.jsx';
-import { AlertCircle } from 'lucide-react';
-import { useNavigate } from "react-router-dom";
+import { dashboardStyles, getLevelTone, levelBadgeTone } from '../assets/dummyStyles.jsx';
+import {
+  AlertCircle,
+  ArrowRight,
+  BarChart3,
+  CheckCircle2,
+  Clock,
+  Download,
+  Eye,
+  EyeOff,
+  FileSpreadsheet,
+  Layers,
+  Lightbulb,
+  RefreshCw,
+  Search,
+  Sparkles,
+  Trash2,
+  TrendingUp,
+  UploadCloud,
+  UserCheck,
+  Users,
+  X,
+} from 'lucide-react';
 
-// Helper functions
-const levels = [
-  { value: "Basic", color: "text-green-600", bg: "bg-green-50" },
-  { value: "Intermediate", color: "text-yellow-600", bg: "bg-yellow-50" },
-  { value: "Advanced", color: "text-red-600", bg: "bg-red-50" },
-];
+// Difficulty options; the selected state's colours come from the shared
+// level-tone map in the style registry (one palette for every admin screen).
+const LEVEL_VALUES = ["Basic", "Intermediate", "Advanced"];
+
+const LEVEL_BLURBS = {
+  Basic: "Warm-up level",
+  Intermediate: "Working knowledge",
+  Advanced: "Deep expertise",
+};
 
 const letterForIndex = (i) => ["A", "B", "C", "D"][i] || "";
+
+const CSV_TEMPLATE =
+  "Question,Option A,Option B,Option C,Option D,Answer\n" +
+  "What is 2 plus 2?,One,Two,Three,Four,One\n";
 
 // CSV parsing function
 function parseCSVText(csvText) {
@@ -63,7 +91,7 @@ function parseCSVText(csvText) {
 }
 
 const Dashboard = () => {
-    
+
   const [technology, setTechnology] = useState("");
   const [level, setLevel] = useState("Basic");
   const [timeLimit, setTimeLimit] = useState(30); // in minutes
@@ -75,34 +103,64 @@ const Dashboard = () => {
     message: "",
   });
   const [showPreview, setShowPreview] = useState(false);  // preview for uploaded questions
+  const [previewQuery, setPreviewQuery] = useState("");
   const [validationErrors, setValidationErrors] = useState({});
   const fileInputRef = useRef(null);
 
-  const [adminStats, setAdminStats] = useState({
-    totalUsers: 0,
-    totalLoggedIn: 0,
-    loggedInPercentage: 0,
-  });
+  // Real platform stats from GET /admin/stats (admin-only on the server).
+  // status: loading | ready | error — never fabricated numbers.
+  const [stats, setStats] = useState(null);
+  const [statsStatus, setStatsStatus] = useState("loading");
+  const [statsAttempt, setStatsAttempt] = useState(0);
   const { request } = useApi();
   const navigate = useNavigate();
 
-//   Total users
   useEffect(() => {
+    let mounted = true;
     const loadStats = async () => {
+      setStatsStatus("loading");
       try {
         const data = await request("/admin/stats");
-        console.log("ADMIN STATS:", data);
-        setAdminStats({
-          totalUsers: data.totalUsers || 0,
-          totalLoggedIn: data.loggedInUsers || 0,
-          loggedInPercentage: data.loggedInPercentage || 0,
+        if (!mounted) return;
+        setStats({
+          totalUsers: data.totalUsers ?? null,
+          totalLoggedIn: data.loggedInUsers ?? null,
+          loggedInPercentage: data.loggedInPercentage ?? null,
+          totalQuizzes: data.totalQuizzes ?? null,
+          totalQuestions: data.totalQuestions ?? null,
+          levelCounts: data.levelCounts ?? null,
+          recentQuizzes: Array.isArray(data.recentQuizzes) ? data.recentQuizzes : [],
         });
-      } catch (err) {
-        console.log("Stats error:", err);
+        setStatsStatus("ready");
+      } catch {
+        if (!mounted) return;
+        setStats(null);
+        setStatsStatus("error");
       }
     };
 
     loadStats();
+    return () => {
+      mounted = false;
+    };
+    // Re-runs when the user asks for a retry.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [statsAttempt]);
+
+  // Losing the CSV-loaded questions to an accidental navigation would cost the
+  // admin real work, so the browser asks for confirmation while any are loaded.
+  // resetForm() clears the flag before the post-success redirect, so the happy
+  // path never prompts.
+  const hasQuestionsRef = useRef(false);
+  useEffect(() => {
+    const onBeforeUnload = (event) => {
+      if (hasQuestionsRef.current) {
+        event.preventDefault();
+        event.returnValue = "";
+      }
+    };
+    window.addEventListener("beforeunload", onBeforeUnload);
+    return () => window.removeEventListener("beforeunload", onBeforeUnload);
   }, []);
 
 //   Toast timer
@@ -114,6 +172,8 @@ const Dashboard = () => {
       return () => clearTimeout(timer);
     }
   }, [toast.show]);
+
+  const showToast = (type, message) => setToast({ show: true, type, message });
 
 //   Form validation
   const validateForm = () => {
@@ -154,14 +214,19 @@ const Dashboard = () => {
     setIsDragging(false);
 
     const file = e.dataTransfer.files[0];
-    if (file && file.type === "text/csv") {
+    // Browsers are inconsistent about CSV MIME types (`text/csv`,
+    // `application/vnd.ms-excel` or empty for unknown files), so the file
+    // extension is the reliable signal.
+    const isCsv =
+      file &&
+      (file.type === "text/csv" ||
+        file.type === "application/vnd.ms-excel" ||
+        file.type === "" ||
+        String(file.name).toLowerCase().endsWith(".csv"));
+    if (isCsv) {
       processCSVFile(file);
     } else {
-      setToast({
-        show: true,
-        type: "error",
-        message: "Please upload a valid CSV file",
-      });
+      showToast("error", "Please upload a valid CSV file");
     }
   };
 
@@ -186,11 +251,7 @@ const Dashboard = () => {
 
     const rows = parseCSVText(csvText);
     if (rows.length === 0) {
-      setToast({
-        show: true,
-        type: "error",
-        message: "Uploaded CSV is empty or invalid",
-      });
+      showToast("error", "Uploaded CSV is empty or invalid");
       return;
     }
 
@@ -293,33 +354,23 @@ const Dashboard = () => {
     }
 
     if (parsedQuestions.length === 0) {
-      setToast({
-        show: true,
-        type: "error",
-        message: "No valid questions found in CSV",
-      });
+      showToast("error", "No valid questions found in CSV");
       return;
     }
 
     setQuestions(parsedQuestions);
+    hasQuestionsRef.current = true;
     setShowPreview(true);
+    setPreviewQuery("");
     setValidationErrors((prev) => ({ ...prev, questions: "" }));
 
-    setToast({
-      show: true,
-      type: "success",
-      message: `${parsedQuestions.length} questions loaded successfully`,
-    });
+    showToast("success", `${parsedQuestions.length} questions loaded successfully`);
   }; // This function will open the CSV file and
- // show the ques, ans options
+  // show the ques, ans options
 
   const handleSubmit = async () => {
     if (!validateForm()) {
-      setToast({
-        show: true,
-        type: "error",
-        message: "Please fill all required fields",
-      });
+      showToast("error", "Please fill all required fields");
       return;
     }
 
@@ -332,72 +383,371 @@ const Dashboard = () => {
         totalQuestions: questions.length,
       };
 
-      const res = await request(
+      await request(
         "/admin/upload-quiz",
         "POST",
         payload,
       );
 
-      setToast({
-        show: true,
-        type: "success",
-        message: `Quiz "${technology}" created successfully`,
-      });
+      showToast("success", `Quiz "${technology}" created successfully`);
 
       resetForm();
-      // Navigate to quiz giving page after creation
-      // After quiz creation, redirect to home/landing page
-      window.location.href = "http://localhost:5174";
+      // In-app navigation (no full reload): the catalogue shows the new quiz
+      // and the admin keeps their session exactly where it was.
+      navigate("/list");
     } catch (err) {
       console.log("UPLOAD ERROR:", err);
 
-      setToast({
-        show: true,
-        type: "error",
-        message: err.message || "Quiz upload failed",
-      });
+      showToast("error", err.message || "Quiz upload failed");
     }
   };
 
   // back to the initial state after successful upload
   const resetForm = () => {
+    hasQuestionsRef.current = false;
     setTechnology("");
     setLevel("Basic");
     setTimeLimit(30);
     setQuestions([]);
     setShowPreview(false);
+    setPreviewQuery("");
     setValidationErrors({});
     if (fileInputRef.current) {
       fileInputRef.current.value = "";
     }
   };
 
-  const isFormValid =
-    technology.trim() && level && timeLimit >= 1 && questions.length > 0;
+  const handleClearForm = () => {
+    resetForm();
+    showToast("info", "Form cleared");
+  };
 
+  const removeQuestion = (index) => {
+    setQuestions((prev) => {
+      const next = prev.filter((_, i) => i !== index);
+      if (next.length === 0) {
+        setShowPreview(false);
+      }
+      return next;
+    });
+  };
+
+  const downloadCsvTemplate = () => {
+    try {
+      const blob = new Blob([CSV_TEMPLATE], { type: "text/csv;charset=utf-8;" });
+      const url = URL.createObjectURL(blob);
+      const link = document.createElement("a");
+      link.href = url;
+      link.download = "tech-quiz-template.csv";
+      document.body.appendChild(link);
+      link.click();
+      link.remove();
+      URL.revokeObjectURL(url);
+      showToast("success", "CSV template downloaded");
+    } catch {
+      showToast("error", "Could not download the template");
+    }
+  };
+
+  const formComplete =
+    Boolean(technology.trim()) && Boolean(level) && timeLimit >= 1 && questions.length > 0;
+
+  const visiblePreview = questions
+    .map((q, index) => ({ q, index }))
+    .filter(({ q }) =>
+      q.question.toLowerCase().includes(previewQuery.trim().toLowerCase()),
+    );
+
+  const loggedInRate = Number(stats?.loggedInPercentage);
+  const progressWidth = Number.isFinite(loggedInRate)
+    ? Math.max(0, Math.min(100, loggedInRate))
+    : 0;
 
   return (
     <div className={dashboardStyles.page}>
       <div className={dashboardStyles.container}>
-        <div className={dashboardStyles.headerWrapper}>
-          <div className={dashboardStyles.headerInner}>
-            <h1 className={dashboardStyles.title}>Tech Quiz Master</h1>
+        <header className={dashboardStyles.headerWrapper}>
+          <div className={dashboardStyles.headerRow}>
+            <div>
+              <span className={dashboardStyles.headerEyebrow}>
+                <span className={dashboardStyles.headerEyebrowDot} aria-hidden="true" />
+                Admin workspace
+              </span>
+              <h1 className={dashboardStyles.title}>Dashboard</h1>
+              <p className={dashboardStyles.subtitle}>
+                Create a new quiz and review the platform&apos;s real numbers.
+              </p>
+            </div>
+            <div className={dashboardStyles.headerActions}>
+              <button
+                type="button"
+                onClick={() => navigate("/list")}
+                className={dashboardStyles.headerPrimaryLink}
+              >
+                <Layers className={dashboardStyles.headerPrimaryIcon} aria-hidden="true" />
+                Manage quizzes
+              </button>
+              <button
+                type="button"
+                onClick={downloadCsvTemplate}
+                className={dashboardStyles.headerLink}
+              >
+                <Download className={dashboardStyles.headerLinkIcon} aria-hidden="true" />
+                CSV template
+              </button>
+            </div>
           </div>
-        </div>
+        </header>
+
+        {/* Platform stats — only real GET /admin/stats values, with honest states */}
+        <section
+          aria-label="Platform statistics"
+          className={dashboardStyles.statsCard}
+        >
+          <div className={dashboardStyles.statsHeader}>
+            <div className={dashboardStyles.statsHeaderLeft}>
+              <div className={dashboardStyles.statsIconBox} aria-hidden="true">
+                <BarChart3 className={dashboardStyles.statsIcon} />
+              </div>
+              <div>
+                <h2 className={dashboardStyles.statsTitle}>Platform stats</h2>
+                <p className={dashboardStyles.statsSubtitle}>
+                  Live values served by the access-controlled stats endpoint
+                </p>
+              </div>
+            </div>
+            <button
+              type="button"
+              aria-label="Refresh stats"
+              className={dashboardStyles.statsRetry}
+              onClick={() => setStatsAttempt((n) => n + 1)}
+            >
+              <RefreshCw className="h-4 w-4" aria-hidden="true" />
+            </button>
+          </div>
+          {statsStatus === "loading" && (
+            <div className={dashboardStyles.statsGrid}>
+              {[0, 1, 2, 3].map((i) => (
+                <div key={i} className={dashboardStyles.statCard}>
+                  <div className={dashboardStyles.statSkeleton} />
+                </div>
+              ))}
+            </div>
+          )}
+          {statsStatus === "error" && (
+            <div
+              className={dashboardStyles.statsErrorRow}
+              role="status"
+            >
+              <span>Stats are unavailable right now.</span>
+              <button
+                type="button"
+                className={dashboardStyles.statsRetry}
+                onClick={() => setStatsAttempt((n) => n + 1)}
+              >
+                Try again
+              </button>
+            </div>
+          )}
+          {statsStatus === "ready" && stats && (
+            <>
+              <div className={dashboardStyles.statsGrid}>
+                <div className={dashboardStyles.statCard}>
+                  <div className={dashboardStyles.statCardContent}>
+                    <div className={dashboardStyles.statIconBox}>
+                      <Users
+                        className={`${dashboardStyles.statIcon} ${dashboardStyles.statIconIndigo}`}
+                        aria-hidden="true"
+                      />
+                    </div>
+                    <div className={dashboardStyles.statTextWrap}>
+                      <div className={dashboardStyles.statLabel}>
+                        Registered users
+                      </div>
+                      <div className={dashboardStyles.statValue}>
+                        {stats.totalUsers ?? "—"}
+                      </div>
+                    </div>
+                  </div>
+                </div>
+                <div className={dashboardStyles.statCard}>
+                  <div className={dashboardStyles.statCardContent}>
+                    <div className={dashboardStyles.statIconBox}>
+                      <UserCheck
+                        className={`${dashboardStyles.statIcon} ${dashboardStyles.statIconEmerald}`}
+                        aria-hidden="true"
+                      />
+                    </div>
+                    <div className={dashboardStyles.statTextWrap}>
+                      <div className={dashboardStyles.statLabel}>
+                        Logged in
+                      </div>
+                      <div className={dashboardStyles.statValue}>
+                        {stats.totalLoggedIn ?? "—"}
+                      </div>
+                    </div>
+                  </div>
+                </div>
+                <div className={dashboardStyles.statCard}>
+                  <div className={dashboardStyles.statCardContent}>
+                    <div className={dashboardStyles.statIconBox}>
+                      <TrendingUp
+                        className={`${dashboardStyles.statIcon} ${dashboardStyles.statIconViolet}`}
+                        aria-hidden="true"
+                      />
+                    </div>
+                    <div className={dashboardStyles.statTextWrap}>
+                      <div className={dashboardStyles.statLabel}>
+                        Login rate
+                      </div>
+                      <div className={dashboardStyles.statValue}>
+                        {stats.loggedInPercentage != null
+                          ? `${stats.loggedInPercentage}%`
+                          : "—"}
+                      </div>
+                      <div
+                        className={dashboardStyles.loginProgressTrack}
+                        aria-hidden="true"
+                      >
+                        <div
+                          className={dashboardStyles.loginProgressFill}
+                          style={{ width: `${progressWidth}%` }}
+                        />
+                      </div>
+                    </div>
+                  </div>
+                </div>
+                <div className={dashboardStyles.statCard}>
+                  <div className={dashboardStyles.statCardContent}>
+                    <div className={dashboardStyles.statIconBox}>
+                      <Layers
+                        className={`${dashboardStyles.statIcon} ${dashboardStyles.statIconAmber}`}
+                        aria-hidden="true"
+                      />
+                    </div>
+                    <div className={dashboardStyles.statTextWrap}>
+                      <div className={dashboardStyles.statLabel}>
+                        Quizzes in catalog
+                      </div>
+                      <div className={dashboardStyles.statValue}>
+                        {stats.totalQuizzes ?? "—"}
+                      </div>
+                      {typeof stats.totalQuestions === "number" && (
+                        <div className={dashboardStyles.statMeta}>
+                          {stats.totalQuestions} questions
+                        </div>
+                      )}
+                    </div>
+                  </div>
+                </div>
+              </div>
+
+              {stats.levelCounts && (
+                <div className={dashboardStyles.levelSplit}>
+                  {LEVEL_VALUES.map((lvl) => {
+                    const tone = getLevelTone(lvl);
+                    return (
+                      <span key={lvl} className={dashboardStyles.levelSplitItem}>
+                        <span
+                          className={`h-2 w-2 rounded-full ${tone.dot}`}
+                          aria-hidden="true"
+                        />
+                        {lvl}: {stats.levelCounts[lvl] ?? 0}
+                      </span>
+                    );
+                  })}
+                </div>
+              )}
+
+              {stats.recentQuizzes.length > 0 && (
+                <div className={dashboardStyles.recentCard}>
+                  <div className={dashboardStyles.recentHeader}>
+                    <h3 className={dashboardStyles.recentTitle}>
+                      Recent uploads
+                    </h3>
+                    <span className={dashboardStyles.recentHint}>
+                      Latest {stats.recentQuizzes.length}
+                    </span>
+                  </div>
+                  <ul className={dashboardStyles.recentList}>
+                    {stats.recentQuizzes.map((quiz) => (
+                      <li key={quiz._id} className={dashboardStyles.recentItem}>
+                        <div className={dashboardStyles.recentItemLeft}>
+                          <span
+                            className={dashboardStyles.recentAvatar}
+                            aria-hidden="true"
+                          >
+                            <FileSpreadsheet
+                              className={dashboardStyles.recentAvatarIcon}
+                            />
+                          </span>
+                          <div className="min-w-0">
+                            <div className={dashboardStyles.recentName}>
+                              {quiz.technology}
+                            </div>
+                            <div className={dashboardStyles.recentMeta}>
+                              {quiz.totalQuestions ?? 0} questions ·{" "}
+                              {quiz.timeLimit != null
+                                ? `${quiz.timeLimit} min`
+                                : "no time limit"}
+                            </div>
+                          </div>
+                        </div>
+                        <span
+                          className={`${dashboardStyles.recentBadge} ${levelBadgeTone(quiz.level)}`}
+                        >
+                          {quiz.level}
+                        </span>
+                      </li>
+                    ))}
+                  </ul>
+                </div>
+              )}
+            </>
+          )}
+        </section>
+
         <div className={dashboardStyles.grid}>
           {/* Main Column */}
           <div className={dashboardStyles.mainColumn}>
             <div className={dashboardStyles.card}>
-              <h2 className={dashboardStyles.cardTitle}>Create New Quiz</h2>
+              <div className={dashboardStyles.sectionHeader}>
+                <span className={dashboardStyles.sectionStep} aria-hidden="true">
+                  1
+                </span>
+                <div>
+                  <h2 className={dashboardStyles.cardTitle}>Create New Quiz</h2>
+                  <p className={dashboardStyles.cardHint}>
+                    Name the quiz, pick a level and load the question bank.
+                  </p>
+                </div>
+              </div>
               <div className={dashboardStyles.formFields}>
                 {/* Technology Input */}
                 <div>
-                  <label className={dashboardStyles.label}>
-                    Technology Name <span className="text-red-500">*</span>
+                  <label
+                    htmlFor="quiz-technology"
+                    className={dashboardStyles.label}
+                  >
+                    Technology Name{" "}
+                    <span
+                      className={dashboardStyles.requiredMark}
+                      aria-hidden="true"
+                    >
+                      *
+                    </span>
                   </label>
                   <input
+                    id="quiz-technology"
                     type="text"
                     value={technology}
+                    autoComplete="off"
+                    aria-invalid={Boolean(validationErrors.technology)}
+                    aria-describedby={
+                      validationErrors.technology
+                        ? "quiz-technology-error"
+                        : undefined
+                    }
                     onChange={(e) => {
                       setTechnology(e.target.value);
                       setValidationErrors((prev) => ({ ...prev, technology: "" }));
@@ -410,8 +760,15 @@ const Dashboard = () => {
                     }`}
                   />
                   {validationErrors.technology && (
-                    <p className={dashboardStyles.errorMessage}>
-                      <AlertCircle className={dashboardStyles.errorIcon} />
+                    <p
+                      id="quiz-technology-error"
+                      className={dashboardStyles.errorMessage}
+                      role="alert"
+                    >
+                      <AlertCircle
+                        className={dashboardStyles.errorIcon}
+                        aria-hidden="true"
+                      />
                       {validationErrors.technology}
                     </p>
                   )}
@@ -419,29 +776,60 @@ const Dashboard = () => {
 
                 {/* Level Selection */}
                 <div>
-                  <label className={dashboardStyles.label}>Level <span className="text-red-500">*</span></label>
-                  <div className={dashboardStyles.levelGrid}>
-                    {levels.map((lvl) => (
-                      <button
-                        key={lvl.value}
-                        type="button"
-                        className={`${dashboardStyles.levelButtonBase} ${
-                          level === lvl.value
-                            ? `${lvl.bg} ${lvl.color} border-2 border-current`
-                            : "bg-white border-gray-200 text-gray-700"
-                        }`}
-                        onClick={() => {
-                          setLevel(lvl.value);
-                          setValidationErrors((prev) => ({ ...prev, level: "" }));
-                        }}
-                      >
-                        <span className={dashboardStyles.levelButtonTextBase}>{lvl.value}</span>
-                      </button>
-                    ))}
+                  {/* Visible caption; the button group below carries its own
+                      aria-label, and a <label for> may only target form
+                      controls — a div is not a labelable element. */}
+                  <span className={dashboardStyles.label}>
+                    Level{" "}
+                    <span
+                      className={dashboardStyles.requiredMark}
+                      aria-hidden="true"
+                    >
+                      *
+                    </span>
+                  </span>
+                  <div
+                    role="group"
+                    aria-label="Level"
+                    className={dashboardStyles.levelGrid}
+                  >
+                    {LEVEL_VALUES.map((lvl) => {
+                      const tone = getLevelTone(lvl);
+                      return (
+                        <button
+                          key={lvl}
+                          type="button"
+                          aria-pressed={level === lvl}
+                          className={`${dashboardStyles.levelButtonBase} ${
+                            level === lvl
+                              ? `${tone.bg} ${tone.text} border-2 border-current`
+                              : dashboardStyles.levelButtonIdle
+                          }`}
+                          onClick={() => {
+                            setLevel(lvl);
+                            setValidationErrors((prev) => ({ ...prev, level: "" }));
+                          }}
+                        >
+                          <span className={dashboardStyles.levelButtonTextBase}>
+                            {lvl}
+                          </span>
+                          <span className={dashboardStyles.levelButtonCaption}>
+                            {LEVEL_BLURBS[lvl]}
+                          </span>
+                        </button>
+                      );
+                    })}
                   </div>
                   {validationErrors.level && (
-                    <p className={dashboardStyles.errorMessage}>
-                      <AlertCircle className={dashboardStyles.errorIcon} />
+                    <p
+                      id="quiz-level-error"
+                      className={dashboardStyles.errorMessage}
+                      role="alert"
+                    >
+                      <AlertCircle
+                        className={dashboardStyles.errorIcon}
+                        aria-hidden="true"
+                      />
                       {validationErrors.level}
                     </p>
                   )}
@@ -449,38 +837,101 @@ const Dashboard = () => {
 
                 {/* Time Limit */}
                 <div>
-                  <label className={dashboardStyles.label}>Time Limit (minutes) <span className="text-red-500">*</span></label>
+                  <label
+                    htmlFor="quiz-time-limit"
+                    className={dashboardStyles.label}
+                  >
+                    Time Limit (minutes){" "}
+                    <span
+                      className={dashboardStyles.requiredMark}
+                      aria-hidden="true"
+                    >
+                      *
+                    </span>
+                  </label>
                   <div className={dashboardStyles.timeContainer}>
                     <div className={dashboardStyles.timeInputWrapper}>
                       <input
+                        id="quiz-time-limit"
                         type="number"
                         min={1}
                         value={timeLimit}
+                        aria-invalid={Boolean(validationErrors.timeLimit)}
+                        aria-describedby={
+                          validationErrors.timeLimit
+                            ? "quiz-time-limit-error"
+                            : undefined
+                        }
                         onChange={(e) => {
                           setTimeLimit(Number(e.target.value));
                           setValidationErrors((prev) => ({ ...prev, timeLimit: "" }));
                         }}
-                        className={dashboardStyles.timeInputBase}
+                        className={`${dashboardStyles.timeInputBase} ${
+                          validationErrors.timeLimit
+                            ? dashboardStyles.inputErrorBorder
+                            : dashboardStyles.inputNormalBorder
+                        }`}
                       />
                     </div>
-                    <span className={dashboardStyles.timeDisplay}>{timeLimit} min</span>
+                    <span className={dashboardStyles.timeDisplay}>
+                      {timeLimit} min
+                    </span>
                   </div>
                   {validationErrors.timeLimit && (
-                    <p className={dashboardStyles.errorMessage}>
-                      <AlertCircle className={dashboardStyles.errorIcon} />
+                    <p
+                      id="quiz-time-limit-error"
+                      className={dashboardStyles.errorMessage}
+                      role="alert"
+                    >
+                      <AlertCircle
+                        className={dashboardStyles.errorIcon}
+                        aria-hidden="true"
+                      />
                       {validationErrors.timeLimit}
                     </p>
                   )}
-                </div>
-                <div className="flex items-center gap-1 mt-2 text-sm text-gray-400">
-                  <svg className="w-4 h-4" fill="none" stroke="currentColor" strokeWidth="2" viewBox="0 0 24 24"><circle cx="12" cy="12" r="10" /><path strokeLinecap="round" strokeLinejoin="round" d="M12 8v4m0 4h.01" /></svg>
-                  <span>Time allocated per participant to complete the quiz</span>
+                  <div className={dashboardStyles.timeHint}>
+                    <Clock className={dashboardStyles.timeHintIcon} aria-hidden="true" />
+                    <span>
+                      Time allocated per participant to complete the quiz
+                    </span>
+                  </div>
                 </div>
 
                 {/* CSV Upload Dropzone */}
                 <div>
-                  <label className={dashboardStyles.label}>Upload Questions (CSV) <span className="text-red-500">*</span></label>
+                  <label
+                    htmlFor="quiz-csv-input"
+                    className={dashboardStyles.label}
+                  >
+                    Upload Questions (CSV){" "}
+                    <span
+                      className={dashboardStyles.requiredMark}
+                      aria-hidden="true"
+                    >
+                      *
+                    </span>
+                  </label>
+                  <div className={dashboardStyles.templateRow}>
+                    <span className={dashboardStyles.templateHint}>
+                      Columns: Question, Option A–D, Answer (letter or text)
+                    </span>
+                    <button
+                      type="button"
+                      onClick={downloadCsvTemplate}
+                      className={dashboardStyles.templateButton}
+                    >
+                      <Download
+                        className={dashboardStyles.templateIcon}
+                        aria-hidden="true"
+                      />
+                      Download template
+                    </button>
+                  </div>
                   <div
+                    role="button"
+                    tabIndex={0}
+                    aria-label="Upload questions CSV: drag and drop, or press Enter to choose a file"
                     className={`${dashboardStyles.dropzoneBase} ${
                       isDragging
                         ? dashboardStyles.dropzoneDragging
@@ -492,23 +943,37 @@ const Dashboard = () => {
                     onDragLeave={handleDragLeave}
                     onDrop={handleDrop}
                     onClick={() => fileInputRef.current && fileInputRef.current.click()}
+                    onKeyDown={(e) => {
+                      if (e.key === "Enter" || e.key === " ") {
+                        e.preventDefault();
+                        fileInputRef.current && fileInputRef.current.click();
+                      }
+                    }}
                   >
                     <input
+                      id="quiz-csv-input"
                       type="file"
                       accept=".csv"
                       ref={fileInputRef}
                       className={dashboardStyles.hiddenInput}
                       onChange={handleFileUpload}
                     />
-                    <div className={dashboardStyles.uploadIconNormal}>
-                      <svg className="w-12 h-12 mx-auto mb-3" fill="none" stroke="currentColor" strokeWidth="2" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" d="M12 16V4m0 12l-4-4m4 4l4-4m-8 8h8a2 2 0 002-2V7a2 2 0 00-2-2H6a2 2 0 00-2 2v9a2 2 0 002 2z" /></svg>
+                    <div className={dashboardStyles.uploadIconWrap} aria-hidden="true">
+                      <UploadCloud className={dashboardStyles.uploadIcon} />
                     </div>
                     <div className={dashboardStyles.dropzoneTextPrimary}>Drag & drop or click to upload CSV</div>
                     <div className={dashboardStyles.dropzoneTextSecondary}>Format: Question, Option A, Option B, Option C, Option D, Answer</div>
                   </div>
                   {validationErrors.questions && (
-                    <p className={dashboardStyles.errorMessage}>
-                      <AlertCircle className={dashboardStyles.errorIcon} />
+                    <p
+                      id="quiz-questions-error"
+                      className={dashboardStyles.errorMessage}
+                      role="alert"
+                    >
+                      <AlertCircle
+                        className={dashboardStyles.errorIcon}
+                        aria-hidden="true"
+                      />
                       {validationErrors.questions}
                     </p>
                   )}
@@ -516,34 +981,40 @@ const Dashboard = () => {
                     <div className={dashboardStyles.successContainer}>
                       <div className={dashboardStyles.successInner}>
                         <div className={dashboardStyles.successLeft}>
-                          <svg className={dashboardStyles.successIcon} fill="none" stroke="currentColor" strokeWidth="2" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" d="M5 13l4 4L19 7" /></svg>
+                          <CheckCircle2
+                            className={dashboardStyles.successIcon}
+                            aria-hidden="true"
+                          />
                           <span className={dashboardStyles.successText}>{questions.length} questions loaded</span>
                         </div>
-                        <button
-                          className={dashboardStyles.previewToggleButton}
-                          type="button"
-                          onClick={() => setShowPreview((prev) => !prev)}
-                        >
-                          {showPreview ? (
-                            <>
-                              {/* Eye-off icon */}
-                              <svg className={dashboardStyles.previewIcon} fill="none" stroke="currentColor" strokeWidth="2" viewBox="0 0 24 24">
-                                <path strokeLinecap="round" strokeLinejoin="round" d="M17.94 17.94A10.06 10.06 0 0112 20c-5.05 0-9.27-3.38-10-8 .21-1.38.77-2.68 1.62-3.77m2.1-2.1A9.97 9.97 0 0112 4c5.05 0 9.27 3.38 10 8-.18 1.18-.6 2.3-1.22 3.28M9.88 9.88a3 3 0 104.24 4.24" />
-                                <path strokeLinecap="round" strokeLinejoin="round" d="M3 3l18 18" />
-                              </svg>
-                              <span>Hide Preview</span>
-                            </>
-                          ) : (
-                            <>
-                              {/* Eye icon */}
-                              <svg className={dashboardStyles.previewIcon} fill="none" stroke="currentColor" strokeWidth="2" viewBox="0 0 24 24">
-                                <path strokeLinecap="round" strokeLinejoin="round" d="M1.5 12S5 5 12 5s10.5 7 10.5 7-3.5 7-10.5 7S1.5 12 1.5 12z" />
-                                <circle cx="12" cy="12" r="3.5" />
-                              </svg>
-                              <span>Show Preview</span>
-                            </>
-                          )}
-                        </button>
+                        <div className="flex items-center gap-1">
+                          <button
+                            className={dashboardStyles.previewToggleButton}
+                            type="button"
+                            aria-expanded={showPreview}
+                            onClick={() => setShowPreview((prev) => !prev)}
+                          >
+                            {showPreview ? (
+                              <>
+                                <EyeOff className={dashboardStyles.previewIcon} aria-hidden="true" />
+                                <span>Hide Preview</span>
+                              </>
+                            ) : (
+                              <>
+                                <Eye className={dashboardStyles.previewIcon} aria-hidden="true" />
+                                <span>Show Preview</span>
+                              </>
+                            )}
+                          </button>
+                          <button
+                            type="button"
+                            className={dashboardStyles.clearButton}
+                            onClick={handleClearForm}
+                          >
+                            <Trash2 className={dashboardStyles.clearIcon} aria-hidden="true" />
+                            Clear
+                          </button>
+                        </div>
                       </div>
                     </div>
                   )}
@@ -551,16 +1022,17 @@ const Dashboard = () => {
 
                 {/* Submit Button */}
                 <button
+                  type="button"
                   className={`${dashboardStyles.submitBase} ${
-                    technology.trim() && level && timeLimit >= 1 && questions.length > 0
+                    formComplete
                       ? dashboardStyles.submitValid
                       : dashboardStyles.submitInvalid
                   }`}
                   onClick={handleSubmit}
-                  disabled={!(technology.trim() && level && timeLimit >= 1 && questions.length > 0)}
+                  disabled={!formComplete}
                 >
                   <span className={dashboardStyles.submitInner}>
-                    <svg className={dashboardStyles.submitIcon} fill="none" stroke="currentColor" strokeWidth="2" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" d="M5 13l4 4L19 7" /></svg>
+                    <Sparkles className={dashboardStyles.submitIcon} aria-hidden="true" />
                     Create Quiz
                   </span>
                 </button>
@@ -577,16 +1049,44 @@ const Dashboard = () => {
                   </div>
                   <div className={dashboardStyles.previewRight}>
                     <span className={dashboardStyles.timeBadge}>
-                      <svg className={dashboardStyles.timeBadgeIcon} fill="none" stroke="currentColor" strokeWidth="2" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" d="M12 8v4l3 3" /><circle cx="12" cy="12" r="10" /></svg>
+                      <Clock className={dashboardStyles.timeBadgeIcon} aria-hidden="true" />
                       <span className={dashboardStyles.timeBadgeText}>{timeLimit} min</span>
                     </span>
                     <span className={dashboardStyles.countBadge}>{questions.length} Qs</span>
                   </div>
                 </div>
+
+                {questions.length > 3 && (
+                  <div className={dashboardStyles.previewSearchWrap}>
+                    <Search
+                      className={dashboardStyles.previewSearchIcon}
+                      aria-hidden="true"
+                    />
+                    <input
+                      type="text"
+                      aria-label="Search loaded questions"
+                      placeholder="Search loaded questions..."
+                      value={previewQuery}
+                      onChange={(e) => setPreviewQuery(e.target.value)}
+                      className={dashboardStyles.previewSearchInput}
+                    />
+                    {previewQuery && (
+                      <button
+                        type="button"
+                        aria-label="Clear question search"
+                        className={dashboardStyles.previewRemove}
+                        onClick={() => setPreviewQuery("")}
+                      >
+                        <X className={dashboardStyles.previewRemoveIcon} aria-hidden="true" />
+                      </button>
+                    )}
+                  </div>
+                )}
+
                 <div className={dashboardStyles.previewList}>
-                  {questions.map((q, idx) => (
-                    <div key={idx} className={dashboardStyles.previewItem}>
-                      <div className="flex gap-4 items-start">
+                  {visiblePreview.map(({ q, index: idx }) => (
+                    <div key={`${idx}-${q.question.slice(0, 16)}`} className={dashboardStyles.previewItem}>
+                      <div className={dashboardStyles.previewItemTop}>
                         <div className={dashboardStyles.previewNumber}>{idx + 1}</div>
                         <div className={dashboardStyles.previewContent}>
                           <div className={dashboardStyles.previewQuestion}>{q.question}</div>
@@ -619,22 +1119,43 @@ const Dashboard = () => {
                                   {opt || <span className={dashboardStyles.optionEmptyText}>Empty</span>}
                                 </span>
                                 {q.answerKey === letterForIndex(i) && (
-                                  <svg className={dashboardStyles.correctIconSvg} fill="none" stroke="currentColor" strokeWidth="2" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" d="M5 13l4 4L19 7" /></svg>
+                                  <CheckCircle2
+                                    className={dashboardStyles.correctIconSvg}
+                                    aria-hidden="true"
+                                  />
                                 )}
                               </div>
                             ))}
                           </div>
                           <div className={dashboardStyles.optionFooter}>
                             <span className={dashboardStyles.answerBadge}>
-                              <svg className={dashboardStyles.answerBadgeIcon} fill="none" stroke="currentColor" strokeWidth="2" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" d="M5 13l4 4L19 7" /></svg>
+                              <CheckCircle2
+                                className={dashboardStyles.answerBadgeIcon}
+                                aria-hidden="true"
+                              />
                               <span className={dashboardStyles.answerBadgeText}>Correct: {q.answerKey} - {q.answerText}</span>
                             </span>
                             <span className={dashboardStyles.positionText}>Q{idx + 1} of {questions.length}</span>
                           </div>
                         </div>
+                        <div className={dashboardStyles.previewActions}>
+                          <button
+                            type="button"
+                            aria-label={`Remove question ${idx + 1}`}
+                            className={dashboardStyles.previewRemove}
+                            onClick={() => removeQuestion(idx)}
+                          >
+                            <Trash2 className={dashboardStyles.previewRemoveIcon} aria-hidden="true" />
+                          </button>
+                        </div>
                       </div>
                     </div>
                   ))}
+                  {visiblePreview.length === 0 && (
+                    <p className={dashboardStyles.previewSubtitle}>
+                      No questions match your search.
+                    </p>
+                  )}
                 </div>
               </div>
             )}
@@ -642,45 +1163,60 @@ const Dashboard = () => {
 
           {/* Right Column: Tips & Summary */}
           <div className={dashboardStyles.rightColumn}>
-            {/* Platform Stats Card */}
-            {/* <div style={{background:'#fff',borderRadius:'16px',boxShadow:'0 2px 8px 0 rgba(31,41,55,0.06)',border:'1px solid #f1f5f9',padding:'24px',marginBottom:'18px'}}>
-              <div style={{fontWeight:'bold',fontSize:'1.15rem',marginBottom:'18px',color:'#222',display:'flex',alignItems:'center',gap:'8px'}}>
-                <svg width="22" height="22" fill="none" stroke="#a78bfa" strokeWidth="2" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" d="M16 7a4 4 0 01.88 7.88M15 19h5v-2a4 4 0 00-3-3.87M9 20H4v-2a4 4 0 013-3.87" /></svg>
-                Platform Stats
-              </div>
-              <div style={{marginBottom:'8px',display:'flex',justifyContent:'space-between',alignItems:'center',fontSize:'15px'}}>
-                <span style={{display:'flex',alignItems:'center',gap:'7px',color:'#444',fontWeight:500}}>
-                  <svg width="18" height="18" fill="none" stroke="#94a3b8" strokeWidth="2" viewBox="0 0 24 24"><circle cx="12" cy="12" r="10" /></svg>
-                  Total Registered Users
-                </span>
-                <span style={{fontWeight:'bold',color:'#222'}}>{adminStats.totalUsers}</span>
-              </div>
-              <div style={{marginBottom:'8px',display:'flex',justifyContent:'space-between',alignItems:'center',fontSize:'15px'}}>
-                <span style={{display:'flex',alignItems:'center',gap:'7px',color:'#444',fontWeight:500}}>
-                  <svg width="18" height="18" fill="none" stroke="#94a3b8" strokeWidth="2" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" d="M5 13l4 4L19 7" /></svg>
-                  Total Logged In Users
-                </span>
-                <span style={{fontWeight:'bold',color:'#222'}}>{adminStats.totalLoggedIn}</span>
-              </div>
-              <div style={{display:'flex',justifyContent:'space-between',alignItems:'center',fontSize:'15px'}}>
-                <span style={{display:'flex',alignItems:'center',gap:'7px',color:'#444',fontWeight:500}}>
-                  <svg width="18" height="18" fill="none" stroke="#4ade80" strokeWidth="2" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" d="M3 17a4 4 0 004 4h10a4 4 0 004-4V7a4 4 0 00-4-4H7a4 4 0 00-4 4v10z" /></svg>
-                  Login Rate
-                </span>
-                <span style={{fontWeight:'bold',color:'#16a34a'}}>{adminStats.totalUsers > 0 ? `${((adminStats.totalLoggedIn / adminStats.totalUsers) * 100).toFixed(2)}%` : '0%'}</span>
-              </div>
-            </div> */}
-
             {/* Quick Tips Card */}
-            <div style={{background:'#eaf3fb',borderRadius:'16px',border:'1px solid #bae6fd',padding:'24px',marginBottom:'18px'}}>
-              <div style={{fontWeight:'bold',fontSize:'1.15rem',marginBottom:'14px',color:'#1e293b',display:'flex',alignItems:'center',gap:'8px'}}>
-                <svg width="20" height="20" fill="none" stroke="#f472b6" strokeWidth="2" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" d="M17 7V3a1 1 0 00-2 0v4M7 7V3a1 1 0 00-2 0v4M5 21h14a2 2 0 002-2V7a2 2 0 00-2-2H5a2 2 0 00-2 2v12a2 2 0 002 2z" /></svg>
-                Quick Tips
+            <aside className={dashboardStyles.tipsCard}>
+              <h2 className={dashboardStyles.tipsTitle}>Quick Tips</h2>
+              <ol className={dashboardStyles.tipsList}>
+                <li className={dashboardStyles.tipsItem}>
+                  <span
+                    className={dashboardStyles.tipsNumber}
+                    aria-hidden="true"
+                  >
+                    1
+                  </span>
+                  <span className={dashboardStyles.tipsText}>
+                    All fields marked with * are required
+                  </span>
+                </li>
+                <li className={dashboardStyles.tipsItem}>
+                  <span
+                    className={dashboardStyles.tipsNumber}
+                    aria-hidden="true"
+                  >
+                    2
+                  </span>
+                  <span className={dashboardStyles.tipsText}>
+                    Preview questions before creating quiz
+                  </span>
+                </li>
+                <li className={dashboardStyles.tipsItem}>
+                  <span
+                    className={dashboardStyles.tipsNumber}
+                    aria-hidden="true"
+                  >
+                    3
+                  </span>
+                  <span className={dashboardStyles.tipsText}>
+                    Set appropriate time limit based on difficulty level
+                  </span>
+                </li>
+              </ol>
+            </aside>
+
+            {/* CSV guide */}
+            <div className={dashboardStyles.summaryCard}>
+              <div className="mb-3 flex items-center gap-2">
+                <Lightbulb className="h-4 w-4 text-amber-500" aria-hidden="true" />
+                <h3 className={dashboardStyles.summaryTitle}>CSV format</h3>
               </div>
-              <div style={{display:'flex',flexDirection:'column',gap:'8px',fontSize:'15px'}}>
-                <div style={{display:'flex',alignItems:'center',gap:'8px'}}><span style={{width:24,height:24,background:'#dbeafe',color:'#2563eb',borderRadius:'9999px',display:'flex',alignItems:'center',justifyContent:'center',fontWeight:'bold',fontSize:14}}>1</span>All fields marked with * are required</div>
-                <div style={{display:'flex',alignItems:'center',gap:'8px'}}><span style={{width:24,height:24,background:'#dbeafe',color:'#2563eb',borderRadius:'9999px',display:'flex',alignItems:'center',justifyContent:'center',fontWeight:'bold',fontSize:14}}>2</span>Preview questions before creating quiz</div>
-                <div style={{display:'flex',alignItems:'center',gap:'8px'}}><span style={{width:24,height:24,background:'#dbeafe',color:'#2563eb',borderRadius:'9999px',display:'flex',alignItems:'center',justifyContent:'center',fontWeight:'bold',fontSize:14}}>3</span>Set appropriate time limit based on difficulty level</div>
+              <p className={dashboardStyles.cardHint}>
+                One question per row. Answer accepts A–D, 1–4, or the option
+                text itself.
+              </p>
+              <div className="mt-3 overflow-x-auto rounded-lg bg-slate-900 p-3">
+                <code className="whitespace-nowrap font-mono text-xs text-slate-200">
+                  Question,A,B,C,D,Answer
+                </code>
               </div>
             </div>
 
@@ -707,21 +1243,29 @@ const Dashboard = () => {
               </div>
               <div className={dashboardStyles.summaryStatusRow}>
                 <span className={`${dashboardStyles.statusBadgeBase} ${
-                  technology.trim() && level && timeLimit >= 1 && questions.length > 0
+                  formComplete
                     ? dashboardStyles.statusBadgeReady
                     : dashboardStyles.statusBadgeIncomplete
                 }`}>
-                  {technology.trim() && level && timeLimit >= 1 && questions.length > 0
-                    ? "Ready to Submit"
-                    : "Incomplete"}
+                  <span className={dashboardStyles.statusBadgeDot} aria-hidden="true" />
+                  {formComplete ? "Ready to Submit" : "Incomplete"}
                 </span>
+                <button
+                  type="button"
+                  onClick={handleClearForm}
+                  className={dashboardStyles.statsRetry}
+                >
+                  Reset
+                </button>
               </div>
             </div>
           </div>
         </div>
 
-        {/* Toast Notification */}
+        {/* Toast Notification — role already implies the right politeness
+            level (alert → assertive, status → polite). */}
         <div
+          role={toast.type === "error" ? "alert" : "status"}
           className={`${dashboardStyles.toastOuter} ${toast.show ? dashboardStyles.toastVisible : dashboardStyles.toastHidden}`}
           style={{ pointerEvents: toast.show ? "auto" : "none" }}
         >
@@ -736,13 +1280,13 @@ const Dashboard = () => {
           >
             <span>
               {toast.type === "success" && (
-                <svg className={dashboardStyles.toastIconSuccess} fill="none" stroke="currentColor" strokeWidth="2" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" d="M5 13l4 4L19 7" /></svg>
+                <CheckCircle2 className={dashboardStyles.toastIconSuccess} aria-hidden="true" />
               )}
               {toast.type === "error" && (
-                <svg className={dashboardStyles.toastIconError} fill="none" stroke="currentColor" strokeWidth="2" viewBox="0 0 24 24"><circle cx="12" cy="12" r="10" /><path strokeLinecap="round" strokeLinejoin="round" d="M15 9l-6 6m0-6l6 6" /></svg>
+                <AlertCircle className={dashboardStyles.toastIconError} aria-hidden="true" />
               )}
               {toast.type === "info" && (
-                <svg className={dashboardStyles.toastIconInfo} fill="none" stroke="currentColor" strokeWidth="2" viewBox="0 0 24 24"><circle cx="12" cy="12" r="10" /><path strokeLinecap="round" strokeLinejoin="round" d="M12 8v4m0 4h.01" /></svg>
+                <ArrowRight className={dashboardStyles.toastIconInfo} aria-hidden="true" />
               )}
             </span>
             <span
@@ -759,9 +1303,10 @@ const Dashboard = () => {
             <button
               className={dashboardStyles.toastCloseButton}
               onClick={() => setToast((prev) => ({ ...prev, show: false }))}
+              aria-label="Dismiss notification"
               style={{ marginLeft: "auto" }}
             >
-              <svg width="20" height="20" fill="none" stroke="currentColor" strokeWidth="2" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" d="M6 18L18 6M6 6l12 12" /></svg>
+              <X className="h-5 w-5" aria-hidden="true" />
             </button>
           </div>
         </div>

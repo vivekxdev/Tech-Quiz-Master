@@ -1,1 +1,50 @@
 @import "tailwindcss";
+
+/* ==========================================================================
+   Step 10 base rules — mirrors the learner app's browser contract so both
+   apps behave the same for keyboard and reduced-motion users.
+   The admin keeps its own slate/indigo utility palette (no @theme tokens),
+   so these use the equivalent literal values.
+   ========================================================================== */
+@layer base {
+  /* Tailwind 4 defaults border color to currentColor; restore a predictable
+     neutral so `border` alone never renders as text-colored. */
+  *,
+  ::before,
+  ::after {
+    border-color: #e2e8f0; /* slate-200 */
+  }
+
+  /* Document-level surface and text, matching the learner app's body
+     contract so overscroll areas and unstyled regions never flash white
+     against the slate-50 pages. */
+  body {
+    background-color: #f8fafc; /* slate-50 */
+    color: #0f172a; /* slate-900 */
+    -webkit-font-smoothing: antialiased;
+    -moz-osx-font-smoothing: grayscale;
+  }
+
+  /* Visible keyboard focus on every interactive element. */
+  :where(a, button, input, select, textarea, summary, [tabindex]):focus-visible {
+    outline: 2px solid #4f46e5; /* indigo-600 */
+    outline-offset: 2px;
+  }
+
+  /* Mouse clicks never leave a stray ring; keyboard focus always does. */
+  :where(a, button):focus:not(:focus-visible) {
+    outline: none;
+  }
+}
+
+/* Motion — restrained, and disabled for users who ask for it. */
+@media (prefers-reduced-motion: reduce) {
+  *,
+  ::before,
+  ::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+    scroll-behavior: auto !important;
+  }
+}

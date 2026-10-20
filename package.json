@@ -1,7 +1,1 @@
-{
-  "dependencies": {
-    "@clerk/clerk-react": "^5.61.4",
-    "@clerk/clerk-sdk-node": "^4.13.23",
-    "@clerk/express": "^2.1.12"
-  }
-}
+{}
